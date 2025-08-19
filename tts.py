@@ -237,7 +237,7 @@ class ChunkedStream(tts.ChunkedStream):
                         tts.SynthesizedAudio(request_id=request_id, frame=frame)
                     )
 
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise APITimeoutError() from e
         except aiohttp.ClientResponseError as e:
             raise APIStatusError(
@@ -282,39 +282,42 @@ class SynthesizeStream(tts.SynthesizeStream):
         if is_given(sample_rate):
             self._opts.sample_rate = sample_rate
 
-    async def _run(self) -> None:
-        audio_bstream = utils.audio.AudioByteStream(
+    async def _run(self, output_emitter) -> None:
+        request_id = utils.shortuuid()
+        output_emitter.initialize(
+            request_id=request_id,
             sample_rate=self._opts.sample_rate,
             num_channels=NUM_CHANNELS,
+            mime_type="audio/pcm",
+            stream=True,
         )
 
         @utils.log_exceptions(logger=logger)
         async def _process_input():
-            # Accumulate text and synthesize in chunks
             accumulated_text = ""
+            segment_id = utils.shortuuid()
+            output_emitter.start_segment(segment_id=segment_id)
             
             async for input_data in self._input_ch:
                 if isinstance(input_data, str):
                     accumulated_text += input_data
                     
-                    # Check if we have a complete sentence or phrase to synthesize
                     if any(punct in accumulated_text for punct in ['.', '!', '?', '\n']):
                         if accumulated_text.strip():
-                            await self._synthesize_text(accumulated_text.strip(), audio_bstream)
+                            await self._synthesize_text(accumulated_text.strip(), output_emitter)
                         accumulated_text = ""
                         
                 elif isinstance(input_data, self._FlushSentinel):
-                    # Synthesize any remaining text
                     if accumulated_text.strip():
-                        await self._synthesize_text(accumulated_text.strip(), audio_bstream)
+                        await self._synthesize_text(accumulated_text.strip(), output_emitter)
                     accumulated_text = ""
 
         await _process_input()
+        output_emitter.end_segment()
+        output_emitter.end_input()
 
-    async def _synthesize_text(self, text: str, audio_bstream: utils.audio.AudioByteStream):
+    async def _synthesize_text(self, text: str, output_emitter):
         """Synthesize a chunk of text and emit audio frames."""
-        request_id = utils.shortuuid()
-        
         try:
             payload = {
                 "speaker": self._opts.speaker,
@@ -322,8 +325,6 @@ class SynthesizeStream(tts.SynthesizeStream):
                 "text": text,
                 "mulaw": self._opts.mulaw,
             }
-            
-            self._mark_started()
             
             async with self._session.post(
                 self._base_url,
@@ -335,25 +336,16 @@ class SynthesizeStream(tts.SynthesizeStream):
                 timeout=self._conn_options.timeout,
             ) as res:
                 if res.status != 200:
-                    logger.error(f"Hamsa TTS API error: {res.status} - {res.reason}")
+                    try:
+                        error_body = await res.text()
+                    except:
+                        error_body = None
+                    logger.error(f"Hamsa TTS API error: {res.status} - {res.reason}" + (f": {error_body}" if error_body else ""))
                     return
 
-                # Stream the response chunks
                 async for chunk in res.content.iter_chunked(8192):
                     if chunk:
-                        for frame in audio_bstream.write(chunk):
-                            self._event_ch.send_nowait(
-                                tts.SynthesizedAudio(
-                                    request_id=request_id,
-                                    frame=frame,
-                                )
-                            )
-
-                # Flush any remaining audio data for this chunk
-                for frame in audio_bstream.flush():
-                    self._event_ch.send_nowait(
-                        tts.SynthesizedAudio(request_id=request_id, frame=frame)
-                    )
+                        output_emitter.push(chunk)
 
         except Exception as e:
             logger.error(f"Error synthesizing text chunk: {e}")
