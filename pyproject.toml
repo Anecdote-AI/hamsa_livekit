@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "livekithamsa"
+dynamic = ["version"]
+description = "LiveKit Agents plugin for Hamsa's Arabic STT and TTS"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Hamsa AI", email = "support@tryhamsa.com" }]
+keywords = ["livekit", "hamsa", "arabic", "stt", "tts", "speech", "voice-agent"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "livekit-agents>=1.5.0",
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+# What the demo agent in demo/ needs on top of the plugin itself.
+demo = [
+    "livekit-agents[silero,openai]>=1.5.0",
+    "python-dotenv>=1.0",
+]
+
+[project.urls]
+Homepage = "https://tryhamsa.com"
+Documentation = "https://docs.tryhamsa.com"
+Source = "https://github.com/hamsa-ai/hamsa_livekit"
+
+[tool.setuptools]
+# The repository root *is* the package: __init__.py and friends live beside this
+# file rather than under src/. Mapping it explicitly keeps `pip install -e .`
+# working without relocating the modules.
+packages = ["livekithamsa"]
+
+[tool.setuptools.package-dir]
+livekithamsa = "."
+
+[tool.setuptools.package-data]
+livekithamsa = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "livekithamsa.version.__version__" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

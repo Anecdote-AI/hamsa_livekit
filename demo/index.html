@@ -1,0 +1,1275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Hamsa × LiveKit — latency bench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans+Arabic:wght@300;400;500;600&display=swap" rel="stylesheet" />
+<style>
+  /* ───────────────────────────────────────────────────────────────
+     Lab-instrument aesthetic: sodium-amber readouts on near-black,
+     technical rules, monospaced numerics. The page is a measuring
+     device, so it is styled like one.
+     ─────────────────────────────────────────────────────────────── */
+  :root {
+    --ink:        #07070a;
+    --ink-2:      #0d0e13;
+    --panel:      #10121a;
+    --rule:       #1e2130;
+    --rule-bright:#2c3145;
+    --dim:        #5b6178;
+    --mid:        #8d93a8;
+    --text:       #d9dbe4;
+    --amber:      #ffb03a;
+    --amber-soft: #7a5417;
+    --rust:       #c2691c;
+    --cyan:       #46e0d0;
+    --rose:       #ff6b6b;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+    --arabic: "IBM Plex Sans Arabic", "IBM Plex Mono", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* Atmosphere: a faint measurement grid, a warm bloom behind the
+     controls, and film grain over everything. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background:
+      radial-gradient(60rem 40rem at 12% 0%, rgba(255,176,58,.07), transparent 65%),
+      radial-gradient(50rem 40rem at 100% 100%, rgba(70,224,208,.05), transparent 60%),
+      linear-gradient(transparent 95%, rgba(255,255,255,.022) 95%) 0 0 / 100% 28px,
+      linear-gradient(90deg, transparent 95%, rgba(255,255,255,.022) 95%) 0 0 / 28px 100%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: -50%;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+    opacity: .035;
+    pointer-events: none;
+    z-index: 999;
+    animation: grain 6s steps(6) infinite;
+  }
+  @keyframes grain {
+    0%,100% { transform: translate(0,0); }
+    20% { transform: translate(-2%, 3%); }
+    40% { transform: translate(3%, -2%); }
+    60% { transform: translate(-3%, -3%); }
+    80% { transform: translate(2%, 2%); }
+  }
+
+  .shell {
+    position: relative;
+    z-index: 1;
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 34px 26px 80px;
+  }
+
+  /* ── masthead ─────────────────────────────────────────────── */
+  header {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 24px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--rule);
+    animation: rise .7s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .wordmark {
+    font-size: 11px;
+    letter-spacing: .34em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .wordmark b { color: var(--amber); font-weight: 500; }
+  h1 {
+    margin: 6px 0 0;
+    font-size: clamp(24px, 4.4vw, 40px);
+    font-weight: 300;
+    letter-spacing: -.02em;
+    line-height: 1;
+  }
+  h1 em {
+    font-style: normal;
+    color: var(--amber);
+  }
+  .subhead {
+    margin: 9px 0 0;
+    color: var(--mid);
+    font-size: 12px;
+    max-width: 46ch;
+  }
+
+  .modechip {
+    flex: 0 0 auto;
+    text-align: right;
+    font-size: 10px;
+    letter-spacing: .22em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .modechip strong {
+    display: block;
+    margin-top: 5px;
+    font-size: 16px;
+    letter-spacing: .06em;
+    font-weight: 500;
+    color: var(--rose);
+  }
+  .modechip.is-fast strong { color: var(--cyan); }
+  .transports {
+    display: flex;
+    gap: 14px;
+    justify-content: flex-end;
+    margin-top: 9px;
+    font-size: 9px;
+    letter-spacing: .12em;
+  }
+  .transports span { display: flex; gap: 6px; align-items: baseline; }
+  .transports i { font-style: normal; color: var(--dim); }
+  .transports b {
+    font-weight: 400;
+    color: var(--mid);
+    border-bottom: 1px solid var(--rule-bright);
+  }
+  /* the socket is the faster path; make that visible at a glance */
+  .transports b.ws { color: var(--cyan); border-bottom-color: var(--cyan); }
+
+  /* ── layout ───────────────────────────────────────────────── */
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(0, 320px) minmax(0, 1fr);
+    gap: 0;
+    margin-top: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+  @media (max-width: 860px) {
+    .grid { grid-template-columns: 1fr; }
+    .col-right { border-left: 0 !important; border-top: 1px solid var(--rule); }
+  }
+
+  .col-left  { padding: 26px 26px 26px 0; animation: rise .7s .06s cubic-bezier(.2,.8,.2,1) both; }
+  .col-right { padding: 26px 0 26px 26px; border-left: 1px solid var(--rule); animation: rise .7s .12s cubic-bezier(.2,.8,.2,1) both; min-width: 0; }
+  @media (max-width: 860px) { .col-left, .col-right { padding-left: 0; padding-right: 0; } }
+
+  .eyebrow {
+    font-size: 10px;
+    letter-spacing: .26em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 16px;
+  }
+  .eyebrow::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--rule);
+  }
+
+  /* ── the button ───────────────────────────────────────────── */
+  .dial {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1;
+    max-width: 236px;
+    margin: 0 auto 22px;
+    display: grid;
+    place-items: center;
+  }
+  .dial svg { position: absolute; inset: 0; width: 100%; height: 100%; transform: rotate(-90deg); }
+  .dial .track { fill: none; stroke: var(--rule); stroke-width: 1; }
+  .dial .arc {
+    fill: none;
+    stroke: var(--amber);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-dasharray: 302;
+    stroke-dashoffset: 302;
+    transition: stroke-dashoffset .12s linear, stroke .3s;
+  }
+  body.live .dial .arc { stroke: var(--cyan); }
+
+  .dial .halo {
+    position: absolute;
+    inset: 12%;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255,176,58,.18), transparent 70%);
+    opacity: 0;
+    transition: opacity .4s;
+  }
+  body.live .dial .halo {
+    opacity: 1;
+    background: radial-gradient(circle, rgba(70,224,208,.2), transparent 70%);
+    animation: breathe 2.6s ease-in-out infinite;
+  }
+  @keyframes breathe { 50% { transform: scale(1.07); opacity: .65; } }
+
+  button.mic {
+    position: relative;
+    width: 58%;
+    aspect-ratio: 1;
+    border-radius: 50%;
+    border: 1px solid var(--rule-bright);
+    background: linear-gradient(165deg, #171a25, #0c0e15);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    gap: 2px;
+    transition: border-color .25s, transform .18s, box-shadow .25s;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  button.mic:hover:not(:disabled) {
+    border-color: var(--amber);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 26px -12px rgba(255,176,58,.5), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  button.mic:active:not(:disabled) { transform: translateY(0) scale(.985); }
+  button.mic:disabled { opacity: .5; cursor: wait; }
+  body.live button.mic { border-color: color-mix(in srgb, var(--cyan) 45%, var(--rule-bright)); }
+  .mic .glyph { font-size: 19px; letter-spacing: 0; color: var(--amber); }
+  body.live .mic .glyph { color: var(--cyan); }
+
+  /* ── mic level: a column of tick marks ────────────────────── */
+  .level {
+    display: flex;
+    align-items: flex-end;
+    gap: 3px;
+    height: 34px;
+    margin: 0 auto 24px;
+    justify-content: center;
+  }
+  .level i {
+    display: block;
+    width: 3px;
+    height: 4px;
+    background: var(--rule-bright);
+    border-radius: 1px;
+    transition: height .07s linear, background .12s;
+  }
+  .level i.on { background: var(--cyan); }
+  .level i.hot { background: var(--amber); }
+
+  /* ── readouts ─────────────────────────────────────────────── */
+  .readout {
+    border-top: 1px solid var(--rule);
+    padding: 13px 0;
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .readout .k {
+    font-size: 10px;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .readout .v {
+    font-size: 21px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.01em;
+  }
+  .readout .v small { font-size: 10px; color: var(--dim); letter-spacing: .1em; margin-left: 3px; }
+  .readout.total .v { font-size: 30px; color: var(--amber); }
+
+  .swatch { display: inline-block; width: 7px; height: 7px; margin-right: 7px; vertical-align: 1px; }
+  .sw-api  { background: var(--amber); }
+  .sw-wait { background: var(--amber-soft); }
+  .sw-eou  { background: var(--rust); }
+  .sw-llm { background: #7f8cff; }
+  .sw-tts { background: var(--cyan); }
+
+  /* ── transcript ───────────────────────────────────────────── */
+  .transcript {
+    height: 340px;
+    overflow-y: auto;
+    padding-right: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--rule-bright) transparent;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .transcript::-webkit-scrollbar { width: 5px; }
+  .transcript::-webkit-scrollbar-thumb { background: var(--rule-bright); }
+
+  .line { animation: slide .45s cubic-bezier(.2,.8,.2,1) both; }
+  .line .who {
+    font-size: 9px;
+    letter-spacing: .24em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .line .body {
+    font-family: var(--arabic);
+    font-size: 16px;
+    font-weight: 300;
+    line-height: 1.65;
+    border-left: 2px solid var(--rule-bright);
+    padding-left: 13px;
+  }
+  .line[dir="rtl"] .body {
+    border-left: 0;
+    border-right: 2px solid var(--rule-bright);
+    padding-left: 0;
+    padding-right: 13px;
+  }
+  .line.agent .body { border-color: var(--cyan); color: #eef1f6; }
+  .line.user  .body { border-color: var(--amber-soft); color: var(--mid); }
+
+  .empty {
+    color: var(--dim);
+    font-size: 12px;
+    border: 1px dashed var(--rule-bright);
+    padding: 15px;
+    text-align: center;
+  }
+
+  /* ── waterfall ────────────────────────────────────────────── */
+  .bench { margin-top: 28px; animation: rise .7s .18s cubic-bezier(.2,.8,.2,1) both; }
+  .legend {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    font-size: 10px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--mid);
+    margin-bottom: 16px;
+  }
+
+  .note {
+    margin: -4px 0 18px;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--dim);
+    max-width: 78ch;
+  }
+  .note code {
+    color: var(--mid);
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 0 4px;
+    font-size: 10px;
+  }
+  .note b { color: var(--amber); font-weight: 500; }
+
+  .turns { display: flex; flex-direction: column; }
+  .turn {
+    display: grid;
+    grid-template-columns: 38px minmax(0,1fr) 78px;
+    align-items: center;
+    gap: 14px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--rule);
+    animation: slide .5s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .turn .idx {
+    font-size: 10px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .1em;
+  }
+  .bar {
+    display: flex;
+    height: 15px;
+    background: linear-gradient(90deg, rgba(255,255,255,.035), transparent);
+    border-left: 1px solid var(--rule-bright);
+  }
+  .bar span {
+    height: 100%;
+    width: 0;
+    transition: width .55s cubic-bezier(.2,.8,.2,1);
+    position: relative;
+  }
+  .bar .s-api  { background: linear-gradient(180deg, var(--amber), #d99425); }
+  .bar .s-wait { background: repeating-linear-gradient(135deg, var(--amber-soft) 0 3px, #5c3f11 3px 6px); }
+  .bar .s-eou  { background: linear-gradient(180deg, var(--rust), #8d4a13); }
+  .bar .s-llm { background: linear-gradient(180deg, #7f8cff, #4e58c4); }
+  .bar .s-tts { background: linear-gradient(180deg, var(--cyan), #22a397); }
+  .bar span[title]:hover { filter: brightness(1.25); }
+  .turn .tot {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .turn .tot small { color: var(--dim); font-size: 9px; letter-spacing: .1em; }
+
+  .axis {
+    display: grid;
+    grid-template-columns: 38px minmax(0,1fr) 78px;
+    gap: 14px;
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: .12em;
+    margin-top: 8px;
+  }
+  .axis .ticks { display: flex; justify-content: space-between; }
+
+  /* ── status strip ─────────────────────────────────────────── */
+  .status {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    z-index: 5;
+    background: rgba(7,7,10,.92);
+    backdrop-filter: blur(9px);
+    border-top: 1px solid var(--rule);
+    padding: 9px 26px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 11px;
+    color: var(--mid);
+  }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--dim);
+    box-shadow: 0 0 0 0 rgba(70,224,208,.5);
+    flex: 0 0 auto;
+  }
+  body.live .dot { background: var(--cyan); animation: pulse 2s infinite; }
+  body.error .dot { background: var(--rose); }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(70,224,208,.45); }
+    70%  { box-shadow: 0 0 0 7px rgba(70,224,208,0); }
+    100% { box-shadow: 0 0 0 0 rgba(70,224,208,0); }
+  }
+  .status .hint { margin-left: auto; color: var(--dim); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; }
+
+
+  /* ── setup panel ───────────────────────────────────────────── */
+  .setup { border-bottom: 1px solid var(--rule); animation: rise .7s .04s cubic-bezier(.2,.8,.2,1) both; }
+  .setup summary {
+    list-style: none; cursor: pointer; padding: 13px 0;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 10px; letter-spacing: .26em; text-transform: uppercase; color: var(--dim);
+  }
+  .setup summary::-webkit-details-marker { display: none; }
+  .setup summary::after { content: ""; flex: 1; height: 1px; background: var(--rule); }
+  .setup summary b { font-weight: 400; color: var(--amber); letter-spacing: .1em; }
+  .setup summary .chev { transition: transform .25s; color: var(--dim); }
+  .setup[open] summary .chev { transform: rotate(90deg); }
+
+  .fields {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 18px 26px; padding: 4px 0 24px;
+  }
+  .field { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .field > label {
+    font-size: 9px; letter-spacing: .2em; text-transform: uppercase; color: var(--dim);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .field > label var { font-style: normal; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .field .hint { font-size: 10px; color: var(--dim); line-height: 1.5; }
+  .field.wide { grid-column: 1 / -1; }
+
+  .seg { display: flex; border: 1px solid var(--rule-bright); }
+  .seg button {
+    flex: 1; padding: 7px 4px; background: transparent; border: 0;
+    border-right: 1px solid var(--rule-bright); color: var(--mid);
+    font-family: var(--mono); font-size: 10px; letter-spacing: .14em;
+    text-transform: uppercase; cursor: pointer; transition: background .2s, color .2s;
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button:hover { color: var(--text); background: rgba(255,255,255,.03); }
+  .seg button[aria-pressed="true"] { background: rgba(255,176,58,.13); color: var(--amber); }
+  .seg button[aria-pressed="true"].ws { background: rgba(70,224,208,.13); color: var(--cyan); }
+
+  select, input[type="text"], textarea {
+    background: var(--ink-2); border: 1px solid var(--rule-bright); color: var(--text);
+    font-family: var(--mono); font-size: 12px; padding: 7px 8px; width: 100%; border-radius: 0;
+  }
+  textarea { resize: vertical; min-height: 74px; line-height: 1.6; font-family: var(--arabic); font-size: 14px; }
+  select:focus, input[type="text"]:focus, textarea:focus { outline: none; border-color: var(--amber); }
+  input[type="range"] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 3px;
+    background: var(--rule-bright); cursor: pointer;
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 12px; height: 12px;
+    background: var(--amber); border-radius: 50%; cursor: pointer;
+  }
+  input[type="range"]::-moz-range-thumb {
+    width: 12px; height: 12px; border: 0; background: var(--amber); border-radius: 50%;
+  }
+  .derived {
+    font-size: 11px; color: var(--mid); border-left: 2px solid var(--rust);
+    padding-left: 10px; line-height: 1.55; margin: 0;
+  }
+  .derived b { color: var(--amber); font-weight: 500; }
+
+  @keyframes rise  { from { opacity: 0; transform: translateY(14px); } }
+  @keyframes slide { from { opacity: 0; transform: translateY(8px); } }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <header>
+    <div>
+      <div class="wordmark"><b>Hamsa</b> × LiveKit</div>
+      <h1>Latency <em>bench</em></h1>
+      <p class="subhead">
+        Where the silence between "you stopped talking" and "the agent starts talking" is
+        actually spent. Every turn is broken into its three waits.
+      </p>
+    </div>
+    <div class="modechip" id="modechip">
+      agent mode
+      <strong id="modeval">—</strong>
+      <span class="transports">
+        <span><i>stt</i><b id="stt-transport">—</b></span>
+        <span><i>tts</i><b id="tts-transport">—</b></span>
+      </span>
+    </div>
+  </header>
+
+
+  <details class="setup" id="setup" open>
+    <summary><span class="chev">&#9654;</span> Session setup <b id="setup-summary"></b></summary>
+    <div class="fields">
+
+      <div class="field">
+        <label>stt transport</label>
+        <div class="seg" id="seg-stt">
+          <button type="button" data-v="http">http</button>
+          <button type="button" data-v="websocket" class="ws">websocket</button>
+        </div>
+        <span class="hint">the socket is ~30% faster per call, but does not report end-of-speech</span>
+      </div>
+
+      <div class="field">
+        <label>tts transport</label>
+        <div class="seg" id="seg-tts">
+          <button type="button" data-v="http">http</button>
+          <button type="button" data-v="websocket" class="ws">websocket</button>
+        </div>
+        <span class="hint">same audio either way; the socket saves ~20 ms</span>
+      </div>
+
+      <div class="field">
+        <label>turn detection</label>
+        <p class="derived" id="derived-turn"></p>
+      </div>
+
+      <div class="field">
+        <label>vad min silence <var id="out-silence">&mdash;</var></label>
+        <input type="range" id="in-silence" min="0.05" max="1.50" step="0.05" />
+        <span class="hint">quiet needed before a turn can end. Short under EOS; with VAD only it <em>is</em> the turn detector</span>
+      </div>
+
+      <div class="field">
+        <label>vad threshold <var id="out-threshold">&mdash;</var></label>
+        <input type="range" id="in-threshold" min="0.05" max="0.95" step="0.05" />
+        <span class="hint">how confident the VAD must be that this is speech. Raise it in a noisy room</span>
+      </div>
+
+      <div class="field">
+        <label>expressiveness</label>
+        <div class="seg" id="seg-expr">
+          <button type="button" data-v="0">0 flat</button>
+          <button type="button" data-v="1">1</button>
+          <button type="button" data-v="2">2 lively</button>
+        </div>
+        <span class="hint">websocket transport only</span>
+      </div>
+
+      <div class="field">
+        <label>dialect</label>
+        <select id="in-dialect"></select>
+      </div>
+
+      <div class="field">
+        <label>voice <var id="out-voicecount"></var></label>
+        <select id="in-voice"></select>
+      </div>
+
+      <div class="field">
+        <label>or a cloned voice id</label>
+        <input type="text" id="in-speaker" placeholder="uuid &mdash; overrides the list" spellcheck="false" />
+        <span class="hint">preloaded custom voices are passed as their uuid</span>
+      </div>
+
+      <div class="field wide">
+        <label>system prompt</label>
+        <textarea id="in-instructions" dir="auto" spellcheck="false"></textarea>
+        <span class="hint">applied when you connect. Keep replies short &mdash; every word is spoken aloud</span>
+      </div>
+
+    </div>
+  </details>
+
+  <div class="grid">
+    <!-- ─── control column ─── -->
+    <div class="col-left">
+      <p class="eyebrow">Session</p>
+
+      <div class="dial">
+        <div class="halo"></div>
+        <svg viewBox="0 0 100 100" aria-hidden="true">
+          <circle class="track" cx="50" cy="50" r="48" />
+          <circle class="arc" id="arc" cx="50" cy="50" r="48" />
+        </svg>
+        <button class="mic" id="btn">
+          <span class="glyph" id="glyph">◉</span>
+          <span id="btnlabel">connect</span>
+        </button>
+      </div>
+
+      <div class="level" id="level" aria-hidden="true"></div>
+
+      <div class="readout total">
+        <span class="k">median response</span>
+        <span class="v"><span id="med-total">—</span><small>ms</small></span>
+      </div>
+      <div class="readout">
+        <span class="k"><i class="swatch sw-api"></i>stt api call</span>
+        <span class="v"><span id="med-api">—</span><small>ms</small></span>
+      </div>
+      <div class="readout">
+        <span class="k"><i class="swatch sw-wait"></i>vad silence</span>
+        <span class="v"><span id="med-wait">—</span><small>ms</small></span>
+      </div>
+      <div class="readout">
+        <span class="k"><i class="swatch sw-eou"></i>endpointing</span>
+        <span class="v"><span id="med-eou">—</span><small>ms</small></span>
+      </div>
+      <div class="readout">
+        <span class="k"><i class="swatch sw-llm"></i>llm first token</span>
+        <span class="v"><span id="med-llm">—</span><small>ms</small></span>
+      </div>
+      <div class="readout">
+        <span class="k"><i class="swatch sw-tts"></i>tts first byte</span>
+        <span class="v"><span id="med-tts">—</span><small>ms</small></span>
+      </div>
+    </div>
+
+    <!-- ─── transcript column ─── -->
+    <div class="col-right">
+      <p class="eyebrow">Transcript</p>
+      <div class="transcript" id="transcript">
+        <div class="empty" id="empty">
+          Connect, then speak Arabic. Lines appear as each turn is committed.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── waterfall ─── -->
+  <section class="bench">
+    <p class="eyebrow">Per-turn breakdown</p>
+    <div class="legend">
+      <span><i class="swatch sw-api"></i>stt api call</span>
+      <span><i class="swatch sw-wait"></i>vad silence</span>
+      <span><i class="swatch sw-eou"></i>endpointing</span>
+      <span><i class="swatch sw-llm"></i>llm first token</span>
+      <span><i class="swatch sw-tts"></i>tts first byte</span>
+    </div>
+    <p class="note">
+      <code>transcription_delay</code> is measured from when the VAD last heard
+      speech to when the transcript arrived, so it contains two different things.
+      <b>vad silence</b> is the first: nothing can be transcribed until the VAD has
+      observed <code>min_silence_duration</code> of quiet, so this band is that
+      threshold — dead time, not work. <b>stt api call</b> is the second:
+      <code>STTMetrics.duration</code> for the request that produced the committed
+      transcript. <b>endpointing</b> is the remainder of
+      <code>end_of_utterance_delay</code> — transcript in hand to turn committed.
+      <span id="sttshare"></span>
+      <span id="transportnote"></span>
+    </p>
+    <div class="turns" id="turns"></div>
+    <div class="axis">
+      <span></span>
+      <span class="ticks" id="ticks"></span>
+      <span></span>
+    </div>
+  </section>
+</div>
+
+<div class="status">
+  <span class="dot"></span>
+  <span id="statustext">idle — not connected</span>
+  <span class="hint" id="hint">space to toggle</span>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+<script>
+(() => {
+  "use strict";
+  const LK = window.LivekitClient;
+  const $ = (id) => document.getElementById(id);
+
+  const el = {
+    btn: $("btn"), glyph: $("glyph"), btnlabel: $("btnlabel"),
+    status: $("statustext"), hint: $("hint"),
+    transcript: $("transcript"), empty: $("empty"),
+    turns: $("turns"), ticks: $("ticks"), arc: $("arc"), level: $("level"),
+    modeval: $("modeval"), modechip: $("modechip"), sttshare: $("sttshare"),
+    sttTransport: $("stt-transport"), ttsTransport: $("tts-transport"),
+    transportNote: $("transportnote"),
+    med: {
+      total: $("med-total"), api: $("med-api"), wait: $("med-wait"),
+      eou: $("med-eou"), llm: $("med-llm"), tts: $("med-tts"),
+    },
+  };
+
+  // 22 tick marks for the input meter
+  const bars = Array.from({ length: 22 }, () => {
+    const i = document.createElement("i");
+    el.level.appendChild(i);
+    return i;
+  });
+
+  let room = null;
+  let connecting = false;
+  let audioCtx = null;
+  let rafId = 0;
+
+  const ARABIC = /[؀-ۿݐ-ݿ]/;
+  const state = { turns: [], open: null, scaleMs: 1500, sttRuns: [] };
+
+  // ── status ─────────────────────────────────────────────────
+  function setStatus(text, kind) {
+    el.status.textContent = text;
+    document.body.classList.toggle("error", kind === "error");
+  }
+
+  function setLive(live) {
+    document.body.classList.toggle("live", live);
+    el.glyph.textContent = live ? "■" : "◉";
+    el.btnlabel.textContent = live ? "hang up" : "connect";
+  }
+
+  function showTransport(node, value) {
+    if (!value) return;
+    const ws = value === "websocket";
+    node.textContent = ws ? "ws" : "http";
+    node.classList.toggle("ws", ws);
+    node.title = ws
+      ? "persistent websocket — one socket reused for every turn"
+      : "HTTP with keep-alive";
+  }
+
+
+  // ── setup panel ────────────────────────────────────────────
+  // Settings are read by the agent when the job starts, which is before the
+  // session is built -- the VAD threshold and the transports cannot be changed
+  // afterwards. So they travel as query params on /token, which the server turns
+  // into agent dispatch metadata, and they take effect on connect.
+  const DEFAULTS = {
+    stt_transport: "http",
+    tts_transport: "websocket",
+    vad_min_silence: "0.20",
+    vad_threshold: "0.50",
+    expressiveness: "1",
+    dialect: "pls",
+    voice: "Amjad",
+    speaker: "",
+    instructions:
+      "أنت مساعد صوتي ودود يتحدث العربية. أجب بإيجاز شديد — جملة أو جملتين على الأكثر،" +
+      " لأن كلامك يُنطق بصوت مسموع. لا تستخدم قوائم أو رموزًا أو تنسيقًا.",
+  };
+  const STORE = "hamsa-demo-settings";
+  let catalogue = { dialects: [], voices: [] };
+  const setup = {};
+
+  function segment(id, value) {
+    const box = $(id);
+    box.querySelectorAll("button").forEach((b) => {
+      b.setAttribute("aria-pressed", String(b.dataset.v === value));
+    });
+    box.dataset.value = value;
+  }
+
+  function wireSegment(id, onChange) {
+    $(id).querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => {
+        segment(id, b.dataset.v);
+        onChange(b.dataset.v);
+      });
+    });
+  }
+
+  function readSetup() {
+    const dialect = setup.dialect.value || DEFAULTS.dialect;
+    const custom = setup.speaker.value.trim();
+    return {
+      stt_transport: $("seg-stt").dataset.value,
+      tts_transport: $("seg-tts").dataset.value,
+      vad_min_silence: setup.silence.value,
+      vad_threshold: setup.threshold.value,
+      expressiveness: $("seg-expr").dataset.value,
+      dialect,
+      // A cloned-voice id wins over the picker; the API takes either in `speaker`.
+      speaker: custom || setup.voice.value,
+      voice: setup.voice.value,
+      instructions: setup.instructions.value.trim(),
+    };
+  }
+
+  function renderDerived() {
+    const s = readSetup();
+    const eos = s.stt_transport === "http";
+    $("derived-turn").innerHTML = eos
+      ? "<b>EOS</b> — Hamsa's end-of-speech model decides the turn. Fastest, and " +
+        "why the VAD threshold can stay low."
+      : "<b>VAD only</b> — the socket cannot report end-of-speech, so the silence " +
+        "threshold decides the turn. Raise it if you get cut off.";
+    $("setup-summary").textContent =
+      `${s.speaker} · ${s.dialect} · stt ${s.stt_transport === "http" ? "http" : "ws"}` +
+      ` · tts ${s.tts_transport === "http" ? "http" : "ws"} · ${eos ? "eos" : "vad"}`;
+    localStorage.setItem(STORE, JSON.stringify(s));
+  }
+
+  function fillVoices(dialect, preferred) {
+    const list = catalogue.voices.filter((v) => v.dialect === dialect);
+    setup.voice.textContent = "";
+    list.forEach((v) => {
+      const o = document.createElement("option");
+      o.value = v.name;
+      o.textContent = v.name;
+      setup.voice.appendChild(o);
+    });
+    $("out-voicecount").textContent = list.length ? `${list.length} available` : "none";
+    if (preferred && list.some((v) => v.name === preferred)) setup.voice.value = preferred;
+    else if (list.length) setup.voice.value = list[0].name;
+  }
+
+  async function initSetup() {
+    setup.dialect = $("in-dialect");
+    setup.voice = $("in-voice");
+    setup.speaker = $("in-speaker");
+    setup.silence = $("in-silence");
+    setup.threshold = $("in-threshold");
+    setup.instructions = $("in-instructions");
+
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(STORE) || "{}"); } catch (e) { saved = {}; }
+    const v = { ...DEFAULTS, ...saved };
+
+    try {
+      const res = await fetch("/voices");
+      catalogue = await res.json();
+      if (catalogue.error) throw new Error(catalogue.error);
+    } catch (e) {
+      console.warn("voice catalogue unavailable", e);
+      catalogue = { dialects: [{ code: v.dialect, name: v.dialect }], voices: [] };
+    }
+
+    catalogue.dialects.forEach((d) => {
+      const o = document.createElement("option");
+      o.value = d.code;
+      const n = catalogue.voices.filter((x) => x.dialect === d.code).length;
+      o.textContent = `${d.name} (${d.code})${n ? " · " + n : ""}`;
+      setup.dialect.appendChild(o);
+    });
+    setup.dialect.value = v.dialect;
+    fillVoices(v.dialect, v.voice);
+
+    segment("seg-stt", v.stt_transport);
+    segment("seg-tts", v.tts_transport);
+    segment("seg-expr", String(v.expressiveness));
+    setup.silence.value = v.vad_min_silence;
+    setup.threshold.value = v.vad_threshold;
+    setup.speaker.value = v.speaker || "";
+    setup.instructions.value = v.instructions;
+    $("out-silence").textContent = `${Number(v.vad_min_silence).toFixed(2)} s`;
+    $("out-threshold").textContent = Number(v.vad_threshold).toFixed(2);
+
+    wireSegment("seg-stt", (value) => {
+      // Under EOS a short threshold is right; without it the VAD is the whole
+      // turn detector and 0.2s would clip people mid-sentence.
+      const target = value === "http" ? "0.20" : "0.55";
+      setup.silence.value = target;
+      $("out-silence").textContent = `${Number(target).toFixed(2)} s`;
+      renderDerived();
+    });
+    wireSegment("seg-tts", renderDerived);
+    wireSegment("seg-expr", renderDerived);
+
+    setup.silence.addEventListener("input", () => {
+      $("out-silence").textContent = `${Number(setup.silence.value).toFixed(2)} s`;
+      renderDerived();
+    });
+    setup.threshold.addEventListener("input", () => {
+      $("out-threshold").textContent = Number(setup.threshold.value).toFixed(2);
+      renderDerived();
+    });
+    setup.dialect.addEventListener("change", () => {
+      fillVoices(setup.dialect.value, null);
+      renderDerived();
+    });
+    [setup.voice, setup.speaker, setup.instructions].forEach((n) =>
+      n.addEventListener("input", renderDerived)
+    );
+    setup.voice.addEventListener("change", renderDerived);
+    renderDerived();
+  }
+
+  // ── transcript ─────────────────────────────────────────────
+  function addLine(role, text) {
+    if (el.empty) { el.empty.remove(); el.empty = null; }
+    const rtl = ARABIC.test(text);
+    const wrap = document.createElement("div");
+    wrap.className = "line " + (role === "assistant" ? "agent" : "user");
+    wrap.setAttribute("dir", rtl ? "rtl" : "ltr");
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = role === "assistant" ? "agent" : "you";
+    const body = document.createElement("div");
+    body.className = "body";
+    body.textContent = text;
+    wrap.append(who, body);
+    el.transcript.appendChild(wrap);
+    el.transcript.scrollTop = el.transcript.scrollHeight;
+  }
+
+  // ── latency bookkeeping ────────────────────────────────────
+  // Metrics arrive as separate messages per turn, roughly in order:
+  // EOU (turn committed) → LLM (first token) → TTS (first byte). A turn is
+  // considered closed once TTS reports, or when the next EOU shows up.
+  function onMetric(m) {
+    if (m.mode) {
+      el.modeval.textContent = m.mode;
+      el.modechip.classList.toggle("is-fast", m.mode !== "baseline");
+    }
+
+    // Every STT request reports its own duration. HamsaEOS issues one per pause,
+    // so a turn can produce several; only the last one is on the critical path
+    // (the earlier probes overlap with the user still speaking).
+    if ("stt_request_ms" in m) {
+      state.sttRuns.push(m.stt_request_ms);
+      return;
+    }
+
+    if ("eou_delay_ms" in m) {
+      closeTurn();
+      // end_of_utterance_delay = the whole wait from the user going quiet to the
+      // turn being committed. transcription_delay is the portion spent waiting on
+      // transcription; the API call is the measured part of that, and whatever
+      // remains is scheduling/wait rather than the endpoint's own work.
+      const total = m.eou_delay_ms;
+      const reported = typeof m.transcription_delay_ms === "number" ? m.transcription_delay_ms : 0;
+      const transcription = Math.min(total, reported);
+      const runs = state.sttRuns.slice();
+      state.sttRuns = [];
+      const lastCall = runs.length ? runs[runs.length - 1] : 0;
+      const api = Math.min(transcription, lastCall);
+      state.open = {
+        api,
+        wait: Math.max(0, transcription - api),
+        eou: Math.max(0, total - transcription),
+        llm: null,
+        tts: null,
+        runs,
+      };
+      return;
+    }
+
+    if (!state.open) state.open = { api: null, wait: null, eou: null, llm: null, tts: null, runs: [] };
+    if ("llm_ttft_ms" in m) state.open.llm = m.llm_ttft_ms;
+    if ("tts_ttfb_ms" in m) {
+      state.open.tts = m.tts_ttfb_ms;
+      closeTurn();
+    }
+  }
+
+  function closeTurn() {
+    const t = state.open;
+    state.open = null;
+    if (!t) return;
+    const parts = [t.api, t.wait, t.eou, t.llm, t.tts].filter((v) => typeof v === "number");
+    if (!parts.length) return;
+    t.total = parts.reduce((a, b) => a + b, 0);
+    state.turns.push(t);
+    state.scaleMs = Math.max(1500, ...state.turns.map((x) => x.total)) * 1.05;
+    renderTurns();
+    renderMedians();
+  }
+
+  function renderTurns() {
+    el.turns.textContent = "";
+    // newest first: the number you just produced belongs at the top
+    state.turns.slice().reverse().forEach((t, i) => {
+      const n = state.turns.length - i;
+      const row = document.createElement("div");
+      row.className = "turn";
+
+      const idx = document.createElement("span");
+      idx.className = "idx";
+      idx.textContent = String(n).padStart(2, "0");
+
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      [
+        ["s-api", t.api, "stt api call"],
+        ["s-wait", t.wait, "vad silence"],
+        ["s-eou", t.eou, "endpointing"],
+        ["s-llm", t.llm, "llm first token"],
+        ["s-tts", t.tts, "tts first byte"],
+      ]
+        .forEach(([cls, val, label]) => {
+          const s = document.createElement("span");
+          s.className = cls;
+          if (typeof val === "number") {
+            s.title = `${label}: ${val} ms`;
+            requestAnimationFrame(() => {
+              s.style.width = (100 * val / state.scaleMs).toFixed(2) + "%";
+            });
+          }
+          bar.appendChild(s);
+        });
+
+      const tot = document.createElement("span");
+      tot.className = "tot";
+      tot.innerHTML = `${t.total}<small> ms</small>`;
+
+      row.append(idx, bar, tot);
+      el.turns.appendChild(row);
+    });
+    renderTicks();
+  }
+
+  function renderTicks() {
+    const max = Math.round(state.scaleMs);
+    el.ticks.textContent = "";
+    [0, 0.25, 0.5, 0.75, 1].forEach((f) => {
+      const s = document.createElement("span");
+      s.textContent = Math.round(max * f) + (f === 1 ? " ms" : "");
+      el.ticks.appendChild(s);
+    });
+  }
+
+  const median = (xs) => {
+    const v = xs.filter((x) => typeof x === "number").sort((a, b) => a - b);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : Math.round((v[m - 1] + v[m]) / 2);
+  };
+
+  function renderMedians() {
+    const put = (node, val) => { node.textContent = val === null ? "—" : val; };
+    const medApi = median(state.turns.map((t) => t.api));
+    const medWait = median(state.turns.map((t) => t.wait));
+    const medEou = median(state.turns.map((t) => t.eou));
+    put(el.med.total, median(state.turns.map((t) => t.total)));
+    put(el.med.api, medApi);
+    put(el.med.wait, medWait);
+    put(el.med.eou, medEou);
+    put(el.med.llm, median(state.turns.map((t) => t.llm)));
+    put(el.med.tts, median(state.turns.map((t) => t.tts)));
+
+    const detect = (medApi || 0) + (medWait || 0) + (medEou || 0);
+    if (detect > 0) {
+      const share = Math.round((100 * (medApi || 0)) / detect);
+      const last = state.turns[state.turns.length - 1];
+      const runs = last && last.runs ? last.runs : [];
+      const calls = runs.length
+        ? ` Last turn made ${runs.length} stt call${runs.length > 1 ? "s" : ""} (${runs.join(", ")} ms) \u2014 one per pause; only the final one is on the critical path.`
+        : "";
+      el.sttshare.innerHTML =
+        `<br />So far: the api call is <b>${share}%</b> of turn detection.` + calls;
+    }
+  }
+
+  // ── input meter ────────────────────────────────────────────
+  async function startMeter(track) {
+    try {
+      const mst = track.mediaStreamTrack;
+      if (!mst) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(new MediaStream([mst]));
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      analyser.smoothingTimeConstant = 0.75;
+      src.connect(analyser);
+      const buf = new Uint8Array(analyser.fftSize);
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const d = (buf[i] - 128) / 128;
+          sum += d * d;
+        }
+        const rms = Math.sqrt(sum / buf.length);
+        const lit = Math.min(bars.length, Math.round(rms * 3.4 * bars.length));
+        bars.forEach((b, i) => {
+          const on = i < lit;
+          b.style.height = (on ? 5 + i * 1.25 : 4) + "px";
+          b.className = on ? (i > bars.length * 0.8 ? "hot" : "on") : "";
+        });
+        // mirror the level onto the dial arc
+        el.arc.style.strokeDashoffset = String(302 - Math.min(302, 302 * rms * 3.2));
+        rafId = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {
+      console.warn("input meter unavailable", e);
+    }
+  }
+
+  function stopMeter() {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+    bars.forEach((b) => { b.style.height = "4px"; b.className = ""; });
+    el.arc.style.strokeDashoffset = "302";
+    if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+  }
+
+  // ── connect / disconnect ───────────────────────────────────
+  async function connect() {
+    if (connecting) return;
+    connecting = true;
+    el.btn.disabled = true;
+    setStatus("requesting token…");
+
+    try {
+      const params = new URLSearchParams(readSetup());
+      params.delete("voice");  // resolved into `speaker` already
+      const res = await fetch(`/token?${params.toString()}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.hint ? `${data.error} (${data.hint})` : data.error || "token request failed");
+      if (data.dispatch_error) throw new Error(`could not dispatch the agent: ${data.dispatch_error}`);
+
+      setStatus(`connecting to ${data.room}…`);
+      room = new LK.Room({ adaptiveStream: true, dynacast: true });
+
+      room.on(LK.RoomEvent.Disconnected, () => teardown("disconnected"));
+
+      room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind === LK.Track.Kind.Audio) {
+          const audio = track.attach();
+          audio.autoplay = true;
+          audio.style.display = "none";
+          document.body.appendChild(audio);
+        }
+      });
+
+      room.on(LK.RoomEvent.ParticipantConnected, (p) => {
+        setStatus(`live — ${p.identity} joined`);
+      });
+
+      room.on(LK.RoomEvent.DataReceived, (payload, _p, _kind, topic) => {
+        if (topic && topic !== "hamsa-demo") return;
+        let msg;
+        try { msg = JSON.parse(new TextDecoder().decode(payload)); } catch (e) { return; }
+        if (msg.kind === "metrics") onMetric(msg);
+        else if (msg.kind === "transcript") addLine(msg.role, msg.text);
+        else if (msg.kind === "ready") {
+          el.modeval.textContent = msg.mode || "—";
+          el.modechip.classList.toggle("is-fast", msg.mode !== "baseline");
+          showTransport(el.sttTransport, msg.stt_transport);
+          showTransport(el.ttsTransport, msg.tts_transport);
+          if (msg.stt_transport === "http" && msg.mode === "hamsa") {
+            el.transportNote.innerHTML =
+              "<br />STT runs over HTTP on purpose: the websocket does not return the " +
+              "<code>[THINKING]</code> end-of-speech signal that turn detection needs. " +
+              "TTS uses whichever transport is shown above.";
+          }
+          const vad = msg.vad_min_silence !== undefined
+            ? `, vad ${Number(msg.vad_min_silence).toFixed(2)}s/${msg.vad_threshold}`
+            : "";
+          setStatus(`live — ${msg.speaker}/${msg.dialect}, ${msg.eos ? "eos" : "vad"}${vad}`);
+        }
+      });
+
+      await room.connect(data.url, data.token);
+      await room.startAudio().catch(() => {});
+      await room.localParticipant.setMicrophoneEnabled(true);
+
+      const pub = room.localParticipant.getTrackPublication(LK.Track.Source.Microphone);
+      if (pub && pub.track) startMeter(pub.track);
+
+      setLive(true);
+      $("setup").open = false;  // out of the way while talking
+      setStatus(`live — waiting for the agent to join ${data.room}`);
+      el.hint.textContent = "space to hang up";
+
+      // If nothing joins, say why rather than sitting on "waiting" forever.
+      setTimeout(() => {
+        if (room && room.numParticipants === 0) {
+          setStatus(
+            data.agent_name
+              ? `no agent joined — is "python agent.py dev" running with AGENT_NAME=${data.agent_name}?`
+              : "no agent joined — is \"python agent.py dev\" running?",
+            "error"
+          );
+        }
+      }, 12000);
+    } catch (err) {
+      console.error(err);
+      setStatus(String(err.message || err), "error");
+      room = null;
+      setLive(false);
+    } finally {
+      connecting = false;
+      el.btn.disabled = false;
+    }
+  }
+
+  function teardown(why) {
+    stopMeter();
+    setLive(false);
+    el.hint.textContent = "space to connect";
+    setStatus(why === "disconnected" ? "idle — disconnected" : "idle — not connected");
+    room = null;
+  }
+
+  async function disconnect() {
+    if (room) await room.disconnect();
+    teardown("disconnected");
+  }
+
+  el.btn.addEventListener("click", () => (room ? disconnect() : connect()));
+  window.addEventListener("keydown", (e) => {
+    if (e.code === "Space" && e.target === document.body) {
+      e.preventDefault();
+      room ? disconnect() : connect();
+    }
+  });
+
+  renderTicks();
+  initSetup();
+  if (!LK) setStatus("livekit-client failed to load from the CDN", "error");
+})();
+</script>
+</body>
+</html>

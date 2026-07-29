@@ -1,0 +1,21 @@
+__pycache__/
+.venv/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# Credentials. `.env` matches at any depth, so demo/.env is covered too.
+.env
+*.pem
+*.key
+
+# Runtime state from demo/services.py: pids, and logs that carry room names,
+# job ids and participant identities.
+.run/
+*.pid
+*.log
+
+# The voice catalogue lives in voices.py; the source spreadsheet is not needed
+# to build or run anything.
+speakers.xlsx
