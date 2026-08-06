@@ -94,8 +94,11 @@ class STT(stt.STT):
             per-request HTTP overhead, worth roughly 0.1 s per call. It does
             **not** implement the ``[THINKING]`` end-of-speech sentinel, so it
             cannot back :class:`~livekithamsa.eos.HamsaEOS`.
-        model: ``"s2"`` (default server-side) or ``"s3"``. Websocket transport
-            only -- the HTTP endpoint takes no model field.
+        model: ``"s2"`` (default server-side) or ``"s3"``. Honoured on **both**
+            transports. This matters for turn detection: because
+            :class:`~livekithamsa.eos.HamsaEOS` requires HTTP, sending the field
+            only over the socket meant ``s3`` and turn detection were mutually
+            exclusive.
         ws_url: override the websocket endpoint.
         ws_pool_size: sockets to keep. A reply is matched to its request by
             arrival order, so each in-flight call needs its own socket; this is
@@ -129,12 +132,6 @@ class STT(stt.STT):
 
         if transport not in ("http", "websocket"):
             raise ValueError(f"transport must be 'http' or 'websocket', got {transport!r}")
-        if model is not None and transport != "websocket":
-            logger.warning(
-                "Hamsa STT: model=%r is only sent over the websocket transport; "
-                "the HTTP endpoint has no model field and will ignore it.",
-                model,
-            )
 
         self._opts = HamsaSTTOptions(
             language=language,
@@ -275,10 +272,13 @@ class STT(stt.STT):
             "isEosEnabled": opts.eos_enabled,
             "eosThreshold": opts.eos_threshold,
         }
+        # Sent on both transports. `POST /v1/realtime/stt` validates the field --
+        # `{"model": "bogus"}` answers 400 `The Model field's allowed values are:
+        # s2, s3!` -- so it is neither unknown nor ignored there.
+        if opts.model:
+            payload["model"] = opts.model
 
         if opts.transport == "websocket":
-            if opts.model:
-                payload["model"] = opts.model
             text = await self._ensure_ws().request_text(
                 payload, timeout=conn_options.timeout
             )

@@ -199,6 +199,17 @@ tts = livekithamsa.TTS(transport="websocket", expressiveness=1)
 await stt.warmup()   # optional: open the socket before the first turn
 ```
 
+`model` is independent of the transport — `s3` works on HTTP too. That matters
+because `HamsaEOS` requires HTTP (only that endpoint returns `[THINKING]`), so
+the two would otherwise be mutually exclusive:
+
+```python
+stt = livekithamsa.HamsaEOS(                            # turn detection...
+    stt=livekithamsa.STT(language="ar", model="s3"),    # ...on s3
+    vad=silero.VAD.load(min_silence_duration=0.2),
+)
+```
+
 The connection is **opened once and reused for every turn** — a pool holds it open
 for the life of the process, and closing/reopening per turn would put the
 handshake back on the critical path. Verified live: one socket served six
