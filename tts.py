@@ -541,9 +541,21 @@ class SynthesizeStream(tts.SynthesizeStream):
     async def _run_segment(
         self, stream: tokenize.WordStream, output_emitter: tts.AudioEmitter
     ) -> None:
-        # Bounded channel = bounded prefetch. A fetch starts the moment its text
-        # is ready; `send` blocks once `prefetch` chunks are already waiting, so
-        # at most prefetch+1 requests are ever in flight.
+        # Two bounds, and they are not the same thing.
+        #
+        # `slots` caps CONCURRENT REQUESTS at prefetch+1 -- the one being played
+        # plus `prefetch` ahead of it. The channel alone could not do this:
+        # `_ChunkFetch.__init__` fires its request immediately, so bounding only
+        # the buffer let a THIRD request go out at prefetch=1 (one draining, one
+        # buffered, one whose `send` was blocked). That extra request matters on
+        # the websocket transport, where `ws_pool_size` defaults to prefetch+1 --
+        # it went out and then sat waiting for a socket.
+        #
+        # `pipeline` caps chunks BUFFERED and undrained, preserving the ordered
+        # hand-off to LiveKit. A slot is released when its request finishes, which
+        # is earlier than when its audio is consumed -- deliberate, since it is
+        # the request (and its socket) being rationed, not the buffer.
+        slots = asyncio.Semaphore(self._opts.prefetch + 1)
         pipeline = utils.aio.Chan[_ChunkFetch](maxsize=max(1, self._opts.prefetch))
         started = False
 
@@ -556,12 +568,14 @@ class SynthesizeStream(tts.SynthesizeStream):
                         # first had something to say.
                         self._mark_started()
                         started = True
+                    await slots.acquire()
                     await pipeline.send(
                         _ChunkFetch(
                             tts_impl=self._tts,
                             opts=self._opts,
                             text=text,
                             conn_options=self._conn_options,
+                            slot=slots,
                         )
                     )
             finally:
@@ -620,13 +634,24 @@ class _ChunkFetch:
         opts: _TTSOptions,
         text: str,
         conn_options: APIConnectOptions,
+        slot: asyncio.Semaphore | None = None,
     ) -> None:
         self.text = text
+        # Acquired by the producer on this fetch's behalf and released once the
+        # request is done (success, failure or cancellation), which is what frees
+        # the next chunk to start. Guarded so it can never be released twice.
+        self._slot = slot
+        self._released = False
         self._queue: asyncio.Queue[bytes | None | BaseException] = asyncio.Queue()
         self._task = asyncio.create_task(
             self._pump(tts_impl=tts_impl, opts=opts, conn_options=conn_options),
             name="hamsa-tts-fetch",
         )
+
+    def _release(self) -> None:
+        if self._slot is not None and not self._released:
+            self._released = True
+            self._slot.release()
 
     async def _pump(
         self,
@@ -649,6 +674,8 @@ class _ChunkFetch:
             raise
         except BaseException as e:  # noqa: BLE001 - handed to the consumer
             self._queue.put_nowait(e)
+        finally:
+            self._release()
 
     async def drain(self) -> AsyncIterator[bytes]:
         """Yield this chunk's audio in order, re-raising any request failure.
@@ -666,3 +693,6 @@ class _ChunkFetch:
 
     async def aclose(self) -> None:
         await utils.aio.cancel_and_wait(self._task)
+        # `_pump`'s finally normally does this; belt-and-braces for a task
+        # cancelled before it ever ran.
+        self._release()
