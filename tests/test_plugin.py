@@ -455,3 +455,161 @@ def test_streams_get_an_independent_options_copy(monkeypatch):
             await b.aclose()
 
     asyncio.run(check())
+
+
+# -------------------------------------------------- model on both transports
+
+
+class _RecordingSession:
+    """Captures the JSON body of the one POST the STT makes."""
+
+    def __init__(self) -> None:
+        self.bodies: list[dict] = []
+
+    def post(self, **kwargs):
+        self.bodies.append(kwargs["json"])
+
+        class _Res:
+            status = 200
+
+            async def json(self):
+                return {"success": True, "data": {"text": "مرحبا"}}
+
+            async def text(self):
+                return ""
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return None
+
+        return _Res()
+
+
+def _one_second_of_silence() -> rtc.AudioFrame:
+    return rtc.AudioFrame(
+        data=b"\x00\x00" * 16000,
+        sample_rate=16000,
+        num_channels=1,
+        samples_per_channel=16000,
+    )
+
+
+def test_model_is_sent_over_http(monkeypatch):
+    """`POST /v1/realtime/stt` validates the field -- a bogus value answers 400
+    `The Model field's allowed values are: s2, s3!` -- so withholding it on HTTP
+    silently pinned every HTTP request to the server default.
+
+    That is what made `s3` and turn detection mutually exclusive: HamsaEOS
+    requires HTTP, so an eos-driven agent could never reach s3.
+    """
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    session = _RecordingSession()
+    stt_obj = STT(language="ar", model="s3", http_session=session)
+
+    ev = asyncio.run(stt_obj.recognize(buffer=[_one_second_of_silence()]))
+
+    assert ev.alternatives[0].text == "مرحبا"
+    assert session.bodies[0]["model"] == "s3"
+
+
+def test_no_model_field_when_none_is_configured(monkeypatch):
+    """Absent `model` must stay absent, so the server picks its own default."""
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    session = _RecordingSession()
+    asyncio.run(
+        STT(language="ar", http_session=session).recognize(buffer=[_one_second_of_silence()])
+    )
+    assert "model" not in session.bodies[0]
+
+
+def test_model_on_http_no_longer_warns(monkeypatch, caplog):
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    STT(language="ar", model="s3", transport="http")
+    assert not any("only sent over the websocket" in r.getMessage() for r in caplog.records)
+
+
+# -------------------------------------------------- prefetch bound
+
+
+def test_prefetch_bounds_concurrent_requests(monkeypatch):
+    """`prefetch=1` means one request ahead of the one playing -- two, not three.
+
+    Bounding only the channel let a third out: `_ChunkFetch` fires its request at
+    construction, before `send` can block, so at steady state one was draining,
+    one was buffered, and one more had already gone. With `ws_pool_size`
+    defaulting to prefetch+1, that third request went out and then sat waiting
+    for a socket.
+    """
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    from livekithamsa import tts as tts_mod
+
+    in_flight = 0
+    peak = 0
+    release = asyncio.Event()
+
+    async def fake_synthesize(*, tts_impl, opts, text, conn_options):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            await release.wait()
+            yield b"\x00\x00"
+        finally:
+            in_flight -= 1
+
+    monkeypatch.setattr(tts_mod, "_synthesize", fake_synthesize)
+
+    class _Emitter:
+        def start_segment(self, *, segment_id): ...
+
+        def push(self, data): ...
+
+        def flush(self): ...
+
+        def end_segment(self): ...
+
+    async def check() -> None:
+        tts_obj = TTS(
+            prefetch=1,
+            first_chunk_words=1,
+            first_chunk_max_words=1,
+            chunk_words=1,
+            max_chunk_words=1,
+        )
+        synth = tts_obj.stream()
+        words = tts_obj._opts.word_tokenizer.stream()
+        words.push_text("a b c d e f g h ")
+        words.end_input()
+        task = asyncio.create_task(synth._run_segment(words, _Emitter()))
+        await asyncio.sleep(0.05)
+        assert peak == 2, f"prefetch=1 must cap in-flight requests at 2, saw {peak}"
+        release.set()
+        await task
+        await synth.aclose()
+
+    asyncio.run(check())
+
+
+# -------------------------------------------------- EOS stream init order
+
+
+def test_eos_stream_reports_a_vad_failure_not_an_attribute_error(monkeypatch):
+    """`RecognizeStream.__init__` schedules the task whose cleanup reads
+    `_probe_task`, so those attributes must exist before it is called.
+
+    They were assigned after, so a stream torn down before `_run` settled raised
+    `AttributeError: '_EOSStream' object has no attribute '_probe_task'` from
+    inside its own `finally`, burying whatever actually went wrong.
+    """
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    from livekithamsa.eos import HamsaEOS
+
+    class _ExplodingVAD:
+        def stream(self):
+            raise RuntimeError("vad model missing")
+
+    eos = HamsaEOS(stt=STT(language="ar"), vad=_ExplodingVAD())
+    with pytest.raises(RuntimeError, match="vad model missing"):
+        eos.stream()
