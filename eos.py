@@ -177,12 +177,6 @@ class _EOSStream(agents_stt.RecognizeStream):
         language: NotGivenOr[str],
         conn_options: APIConnectOptions,
     ) -> None:
-        # Resample once here, on ingest, rather than per request. The turn buffer
-        # is re-sent on every pause, so resampling it at request time would redo
-        # the same work for the same audio on each probe.
-        super().__init__(
-            stt=eos, conn_options=conn_options, sample_rate=STT_SAMPLE_RATE
-        )
         self._eos = eos
         self._language = language
         self._vad_stream = eos._vad.stream()
@@ -195,6 +189,20 @@ class _EOSStream(agents_stt.RecognizeStream):
         self._turn = 0
         self._probe_task: asyncio.Task[None] | None = None
         self._timer_task: asyncio.Task[None] | None = None
+
+        # LAST, deliberately: `RecognizeStream.__init__` schedules `_main_task`,
+        # which runs `_run` and -- on every exit path -- `_cancel_pending`.
+        # Everything that touches must already exist, or a stream torn down early
+        # raises AttributeError inside its own cleanup and buries the real error.
+        # Reachable today: `eos._vad.stream()` above is the first thing that can
+        # throw after the task exists.
+        #
+        # `sample_rate` resamples once here, on ingest, rather than per request:
+        # the turn buffer is re-sent on every pause, so resampling at request time
+        # would redo the same work for the same audio on each probe.
+        super().__init__(
+            stt=eos, conn_options=conn_options, sample_rate=STT_SAMPLE_RATE
+        )
 
     # -- helpers ---------------------------------------------------------
 
