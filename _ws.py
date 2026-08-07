@@ -44,7 +44,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import aiohttp
-from livekit.agents import APIConnectionError, APIStatusError
+from livekit.agents import APIConnectionError, APIStatusError, APITimeoutError
 
 from .log import logger
 
@@ -117,17 +117,29 @@ class HamsaWSPool:
     async def _dial(self) -> _Conn:
         session = self._session_factory()
         try:
-            ws = await session.ws_connect(
-                self._url,
-                headers={"X-Api-Key": self._api_key},
-                timeout=aiohttp.ClientWSTimeout(ws_close=self._connect_timeout),
-                autoping=True,  # the server pings every 30s
-                heartbeat=None,
+            # asyncio.wait_for, because ClientWSTimeout(ws_close=...) bounds only the
+            # CLOSE handshake -- the upgrade was left on aiohttp's session default, so
+            # a black-holed host could hang the first turn of a call for minutes with
+            # no transcript and no error instead of failing fast into a retry. The
+            # greeting read below already did this correctly.
+            ws = await asyncio.wait_for(
+                session.ws_connect(
+                    self._url,
+                    headers={"X-Api-Key": self._api_key},
+                    timeout=aiohttp.ClientWSTimeout(ws_close=self._connect_timeout),
+                    autoping=True,  # the server pings every 30s
+                    heartbeat=None,
+                ),
+                timeout=self._connect_timeout,
             )
         except aiohttp.WSServerHandshakeError as e:
             raise APIStatusError(
                 message=f"Hamsa websocket handshake failed: {e.message}",
                 status_code=e.status,
+            ) from e
+        except asyncio.TimeoutError as e:
+            raise APITimeoutError(
+                f"Hamsa websocket upgrade timed out after {self._connect_timeout}s"
             ) from e
         except Exception as e:
             raise APIConnectionError(f"Hamsa websocket connect failed: {e}") from e
@@ -221,8 +233,17 @@ class HamsaWSPool:
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
-                    raise APIConnectionError("Hamsa websocket STT timed out")
-                msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                    raise APITimeoutError("Hamsa websocket STT timed out")
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                except asyncio.TimeoutError as e:
+                    # APITimeoutError, not a bare asyncio.TimeoutError: the latter is
+                    # neither APIStatusError nor APIConnectionError, so it escapes the
+                    # caller's retry AND the SDK's `except APIError`, landing in
+                    # `except Exception` and being booked as an UNRECOVERABLE session
+                    # error. The HTTP paths already report this stall as
+                    # APITimeoutError; the transports must agree on severity.
+                    raise APITimeoutError("Hamsa websocket receive timed out") from e
                 if msg.type is aiohttp.WSMsgType.TEXT:
                     envelope = _envelope(msg.data)
                     if envelope is None:
@@ -236,9 +257,26 @@ class HamsaWSPool:
                             f"{envelope.get('payload', {}).get('message')}",
                             status_code=400,
                         )
-                    # An envelope we do not recognise; treat the raw text as the
-                    # answer rather than hanging.
-                    return msg.data
+                    if kind == "response":
+                        # The shape a pre-1.x Hamsa plugin handled explicitly. The
+                        # endpoint normally answers with a bare string, but if it ever
+                        # sends this envelope the transcript is inside it.
+                        inner = envelope.get("payload", envelope)
+                        if isinstance(inner, str):
+                            return inner
+                        if isinstance(inner, dict):
+                            return str(inner.get("text") or "")
+                        return ""
+                    if kind == "end":
+                        return ""  # terminal, no transcript
+                    # An envelope we do not recognise. Returning `msg.data` handed the
+                    # raw JSON back as the transcript, so the caller's turn reached the
+                    # LLM as the literal text `{"type": ...}`. Discarding is also wrong
+                    # but at least it is not answered.
+                    logger.warning(
+                        "Hamsa ws: unrecognised STT envelope %r; discarding", kind
+                    )
+                    return ""
                 if msg.type is aiohttp.WSMsgType.BINARY:
                     logger.debug("Hamsa ws: unexpected binary frame during STT")
                     continue
@@ -255,8 +293,17 @@ class HamsaWSPool:
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    raise APIConnectionError("Hamsa websocket TTS timed out")
-                msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                    raise APITimeoutError("Hamsa websocket TTS timed out")
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=remaining)
+                except asyncio.TimeoutError as e:
+                    # APITimeoutError, not a bare asyncio.TimeoutError: the latter is
+                    # neither APIStatusError nor APIConnectionError, so it escapes the
+                    # caller's retry AND the SDK's `except APIError`, landing in
+                    # `except Exception` and being booked as an UNRECOVERABLE session
+                    # error. The HTTP paths already report this stall as
+                    # APITimeoutError; the transports must agree on severity.
+                    raise APITimeoutError("Hamsa websocket receive timed out") from e
                 if msg.type is aiohttp.WSMsgType.BINARY:
                     # Each frame extends the deadline: a long reply is fine as
                     # long as audio keeps arriving.

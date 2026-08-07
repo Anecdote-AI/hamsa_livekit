@@ -558,9 +558,18 @@ class SynthesizeStream(tts.SynthesizeStream):
         slots = asyncio.Semaphore(self._opts.prefetch + 1)
         pipeline = utils.aio.Chan[_ChunkFetch](maxsize=max(1, self._opts.prefetch))
         started = False
+        # A fetch that has been CONSTRUCTED -- so its request is already in flight --
+        # but not yet handed to the pipeline. At steady state with prefetch=1 the
+        # producer sits blocked in `pipeline.send` holding exactly one of these, and
+        # it is reachable from nowhere else, so cancelling the producer dropped it
+        # with no `aclose()`: its `_pump` kept synthesizing text the caller had
+        # already moved past, and it held one of the `prefetch + 1` pool sockets for
+        # the whole request. Parking it here lets the cleanup below cancel it and
+        # release its slot.
+        pending: _ChunkFetch | None = None
 
         async def produce() -> None:
-            nonlocal started
+            nonlocal started, pending
             try:
                 async for text in self._chunk_texts(stream):
                     if not started:
@@ -569,15 +578,18 @@ class SynthesizeStream(tts.SynthesizeStream):
                         self._mark_started()
                         started = True
                     await slots.acquire()
-                    await pipeline.send(
-                        _ChunkFetch(
-                            tts_impl=self._tts,
-                            opts=self._opts,
-                            text=text,
-                            conn_options=self._conn_options,
-                            slot=slots,
-                        )
+                    pending = _ChunkFetch(
+                        tts_impl=self._tts,
+                        opts=self._opts,
+                        text=text,
+                        conn_options=self._conn_options,
+                        slot=slots,
                     )
+                    await pipeline.send(pending)
+                    # Handed off -- the consumer owns it now, so it must not be closed
+                    # twice. No await between `send` returning and this line, so
+                    # cancellation cannot land in between and lose the reference.
+                    pending = None
             finally:
                 pipeline.close()
 
@@ -603,10 +615,12 @@ class SynthesizeStream(tts.SynthesizeStream):
                 current = None
             await producer
         finally:
-            # On the error path the chunk being read, and anything prefetched
-            # behind it, still have live HTTP requests to tear down.
+            # On the error path the chunk being read, anything prefetched behind it,
+            # and the one the producer constructed but never handed over all still
+            # have live requests to tear down. `pending` is read AFTER the producer is
+            # cancelled, so it reflects the final state.
             await utils.aio.cancel_and_wait(producer)
-            leftovers = [current] if current is not None else []
+            leftovers = [f for f in (current, pending) if f is not None]
             while True:
                 try:
                     leftovers.append(pipeline.recv_nowait())
