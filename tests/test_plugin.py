@@ -5,6 +5,7 @@ policy, audio conversion and response parsing. Nothing here touches the network.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import wave
 
@@ -446,13 +447,47 @@ def test_streams_get_an_independent_options_copy(monkeypatch):
     async def check() -> None:
         a, b = tts_obj.stream(), tts_obj.stream()
         try:
-            a.update_options(speaker="Lana")
-            assert a._opts.speaker == "Lana"
-            assert b._opts.speaker == "Ali"
-            assert tts_obj._opts.speaker == "Ali"
+            a.update_options(speaker="Lana", language_id="en")
+            assert (a._opts.speaker, a._opts.language_id) == ("Lana", "en")
+            assert (b._opts.speaker, b._opts.language_id) == ("Ali", "ar")
+            assert (tts_obj._opts.speaker, tts_obj._opts.language_id) == ("Ali", "ar")
         finally:
             await a.aclose()
             await b.aclose()
+
+    asyncio.run(check())
+
+
+def _options(tts_obj: TTS) -> dict:
+    return {f.name: getattr(tts_obj._opts, f.name) for f in dataclasses.fields(tts_obj._opts)}
+
+
+def test_update_options_moves_language_id_only(monkeypatch):
+    """A bilingual agent retunes the language between turns; nothing else may move."""
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    tts_obj = TTS(speaker="Ali", dialect="ksa", language_id="ar")
+    before = _options(tts_obj)
+
+    tts_obj.update_options(language_id="en")
+
+    after = _options(tts_obj)
+    assert {name for name in before if before[name] != after[name]} == {"language_id"}
+    assert after["language_id"] == "en"
+
+
+def test_a_stream_opened_before_update_options_keeps_its_language_id(monkeypatch):
+    """The retune lands on the next utterance; the one already speaking keeps its language."""
+    monkeypatch.setenv("HAMSA_API_KEY", "test")
+    tts_obj = TTS(dialect="ksa", language_id="ar")
+
+    async def check() -> None:
+        speaking = tts_obj.stream()
+        try:
+            tts_obj.update_options(dialect="en", language_id="en")
+            assert (speaking._opts.dialect, speaking._opts.language_id) == ("ksa", "ar")
+            assert (tts_obj._opts.dialect, tts_obj._opts.language_id) == ("en", "en")
+        finally:
+            await speaking.aclose()
 
     asyncio.run(check())
 

@@ -251,8 +251,15 @@ class TTS(tts.TTS):
         *,
         speaker: NotGivenOr[str] = NOT_GIVEN,
         dialect: NotGivenOr[str] = NOT_GIVEN,
+        language_id: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
-        """Change the voice for subsequent synthesis.
+        """Change the voice or the language for subsequent synthesis.
+
+        Takes effect on the next ``stream()``/``synthesize()``: each copies the
+        options when it opens, so a stream already speaking keeps its own.
+        ``language_id`` travels only on the websocket payload (``languageId``) --
+        the HTTP body has no such field, so on that transport it changes nothing.
+        A bilingual caller switches ``dialect`` and ``language_id`` together.
 
         ``mulaw`` and the sample rate are deliberately not updatable: they change
         the audio format, which LiveKit reads once when the track is created.
@@ -261,6 +268,8 @@ class TTS(tts.TTS):
             self._opts.speaker = speaker
         if is_given(dialect):
             self._opts.dialect = dialect
+        if is_given(language_id):
+            self._opts.language_id = language_id
 
     def synthesize(
         self,
@@ -442,11 +451,14 @@ class SynthesizeStream(tts.SynthesizeStream):
         *,
         speaker: NotGivenOr[str] = NOT_GIVEN,
         dialect: NotGivenOr[str] = NOT_GIVEN,
+        language_id: NotGivenOr[str] = NOT_GIVEN,
     ) -> None:
         if is_given(speaker):
             self._opts.speaker = speaker
         if is_given(dialect):
             self._opts.dialect = dialect
+        if is_given(language_id):
+            self._opts.language_id = language_id
 
     async def _run(self, output_emitter: tts.AudioEmitter) -> None:
         output_emitter.initialize(

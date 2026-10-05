@@ -228,6 +228,31 @@ def test_tts_websocket_transport_streams_binary(monkeypatch):
     assert sent["payload"]["languageId"] == "ar"
 
 
+def test_update_options_language_reaches_the_next_request_on_the_same_socket(monkeypatch):
+    """A bilingual agent's voice follows the caller by retuning between turns. The
+    new dialect/languageId must be on the very next request, on the socket that is
+    already open -- a reconnect per switch would put the handshake on the turn the
+    caller is waiting for."""
+    monkeypatch.setenv("HAMSA_API_KEY", "k")
+    session = _FakeSession(tts_script([b"\x01\x02" * 100]))
+    tts = TTS(transport="websocket", speaker="Lana", dialect="ksa", language_id="ar")
+    monkeypatch.setattr(tts, "_ensure_session", lambda: session)
+
+    async def run():
+        async for _ in tts.synthesize("مرحبا"):
+            pass
+        tts.update_options(dialect="en", language_id="en")
+        async for _ in tts.synthesize("hello"):
+            pass
+        await tts.aclose()
+
+    asyncio.run(run())
+    assert session.dials == 1
+    sent = [m["payload"] for m in session.sockets[0].sent]
+    assert [(p["dialect"], p["languageId"]) for p in sent] == [("ksa", "ar"), ("en", "en")]
+    assert {p["speaker"] for p in sent} == {"Lana"}
+
+
 def test_eos_refuses_the_websocket_transport(monkeypatch):
     """Turn detection is built on a signal the socket does not send. Silently
     degrading would make the agent interrupt people."""
